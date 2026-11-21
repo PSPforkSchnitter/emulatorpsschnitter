@@ -80,6 +80,7 @@ protected:
 	void OnForums(UI::EventParams &e);
 	void OnDownloadUpgrade(UI::EventParams &e);
 	void OnAllowStorage(UI::EventParams &e);
+	void OnRetroHub(UI::EventParams &e);
 
 	UI::TabHolder *tabHolder_ = nullptr;
 

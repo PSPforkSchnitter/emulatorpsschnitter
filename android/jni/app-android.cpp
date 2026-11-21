@@ -98,6 +98,7 @@ struct JNIEnv {};
 #include "Common/GPU/Vulkan/VulkanGraphicsContext.h"
 #include "android/jni/AndroidEGLGraphicsContext.h"
 #include "Common/StringUtils.h"
+#include "UI/RetroHost.h"
 #include "Common/TimeUtil.h"
 
 #include "Core/CmdLine.h"
@@ -740,6 +741,7 @@ extern "C" void Java_org_ppsspp_ppsspp_NativeApp_init
 	g_externalDir = externalStorageDir;
 	g_extFilesDir = externalFilesDir;
 	VulkanSetNativeLibDir(nativeLibDir);
+	RetroHost::Instance().SetNativeLibraryDirectory(nativeLibDir);
 
 	if (!additionalStorageDirsString.empty()) {
 		SplitString(additionalStorageDirsString, ':', g_additionalStorageDirs);

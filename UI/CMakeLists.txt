@@ -154,6 +154,10 @@ list(APPEND UISource
 	UIAtlas.cpp
 	RetroAchievementScreens.cpp
 	RetroAchievementScreens.h
+	RetroHost.cpp
+	RetroHost.h
+	RetroScreen.cpp
+	RetroScreen.h
 )
 
 # Headless and unit test builds never link this - they don't have a UI to show. See the

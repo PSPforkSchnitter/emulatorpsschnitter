@@ -46,6 +46,7 @@
 #include "UI/IAPScreen.h"
 #include "UI/RemoteISOScreen.h"
 #include "UI/DisplayLayoutScreen.h"
+#include "UI/RetroScreen.h"
 #include "UI/SavedataScreen.h"
 #include "UI/InstallUpdateScreen.h"
 #include "UI/InstallZipScreen.h"
@@ -373,6 +374,7 @@ void MainScreen::CreateMainButtons(UI::LinearLayout *parent, bool portrait) {
 		if (System_GetPropertyBool(SYSPROP_HAS_FILE_BROWSER)) {
 			parent->Add(new Choice(ImageID("I_FOLDER_OPEN"), new LinearLayoutParams()))->OnClick.Handle(this, &MainScreen::OnLoadFile);
 		}
+		parent->Add(new Choice(ImageID("I_GEAR"), new LinearLayoutParams()))->OnClick.Handle(this, &MainScreen::OnRetroHub);
 		parent->Add(new Choice(ImageID("I_GEAR"), new LinearLayoutParams()))->OnClick.Handle(this, &MainScreen::OnGameSettings);
 		parent->Add(new Choice(ImageID("I_INFO"), new LinearLayoutParams()))->OnClick.Handle(this, &MainScreen::OnCredits);
 		if (showGold) {
@@ -396,6 +398,7 @@ void MainScreen::CreateMainButtons(UI::LinearLayout *parent, bool portrait) {
 		if (System_GetPropertyBool(SYSPROP_HAS_FILE_BROWSER)) {
 			mainButtons->Add(new Choice(mm->T("Load", "Load...")))->OnClick.Handle(this, &MainScreen::OnLoadFile);
 		}
+		mainButtons->Add(new Choice("Retro XMB"))->OnClick.Handle(this, &MainScreen::OnRetroHub);
 		mainButtons->Add(new Choice(mm->T("Game Settings", "Settings")))->OnClick.Handle(this, &MainScreen::OnGameSettings);
 		mainButtons->Add(new Choice(mm->T("About PPSSPP")))->OnClick.Handle(this, &MainScreen::OnCredits);
 		mainButtons->Add(new Choice(mm->T("www.ppsspp.org")))->OnClick.Handle(this, &MainScreen::OnPPSSPPOrg);
@@ -744,6 +747,10 @@ void MainScreen::OnLoadFile(UI::EventParams &e) {
 			System_PostUIMessage(UIMessage::REQUEST_GAME_BOOT, value);
 		});
 	}
+}
+
+void MainScreen::OnRetroHub(UI::EventParams &e) {
+	screenManager()->push(new RetroScreen());
 }
 
 void MainScreen::DrawBackground(UIContext &dc) {

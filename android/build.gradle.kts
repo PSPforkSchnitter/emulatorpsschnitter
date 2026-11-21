@@ -52,10 +52,16 @@ val gitVersionName = if (commitsSinceTag == 0) gitTag else buildString {
 }
 
 val gitVersionCode =
-	major * 100_000_000 +
+	(major * 100_000_000 +
 		minor * 1000_000 +
 		patch * 10_000 +
-		commitsSinceTag
+		commitsSinceTag).coerceAtLeast(1)
+
+val selectedAbis = if (project.hasProperty("ABI_FILTERS")) {
+	(project.property("ABI_FILTERS") as String).split(",").map { it.trim() }.filter { it.isNotEmpty() }
+} else {
+	listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+}
 
 dependencies {
 	// appcompat 1.8.0 and later need minSdk 23.
@@ -208,7 +214,8 @@ android {
 				}
 			}
 			ndk {
-				abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a", "x86_64"))
+				abiFilters.clear()
+				abiFilters.addAll(selectedAbis)
 				// debugSymbolLevel = "FULL"  // These don't actually help much in the Google Play crash report. We do still have symbols locally.
 			}
 		}
@@ -228,7 +235,8 @@ android {
 				}
 			}
 			ndk {
-				abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a", "x86_64"))
+				abiFilters.clear()
+				abiFilters.addAll(selectedAbis)
 				// debugSymbolLevel = "FULL"
 			}
 		}
@@ -249,7 +257,8 @@ android {
 				}
 			}
 			ndk {
-				abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a"))
+				abiFilters.clear()
+				abiFilters.addAll(selectedAbis)
 				// debugSymbolLevel = "FULL"
 			}
 		}
@@ -271,7 +280,8 @@ android {
 				}
 			}
 			ndk {
-				abiFilters.addAll(listOf("arm64-v8a"))
+				abiFilters.clear()
+				abiFilters.addAll(selectedAbis)
 			}
 		}
 	}
