@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <dirent.h>
 #include <cctype>
 
@@ -17,10 +18,12 @@
 #include "Common/Input/KeyCodes.h"
 
 #include "Core/Config.h"
+#include "Core/KeyMap.h"
 #include "Core/System.h"
 #include "UI/RetroHost.h"
 
 RetroScreen::RetroScreen() {
+	LoadSettings();
 	RefreshStatus();
 }
 
@@ -29,8 +32,48 @@ static const char *Categories[] = {
 	"PSP",
 	"PS2",
 	"LIBRARY",
+	"CONTROLS",
 	"SYSTEM",
 };
+
+static const char *RetroButtonNames[] = {
+	"B", "Y", "SELECT", "START", "UP", "DOWN", "LEFT", "RIGHT", "A", "X", "L", "R",
+	"L2", "R2", "L3", "R3",
+};
+
+void RetroScreen::LoadSettings() {
+	IniFile ini;
+	if (!ini.Load(g_Config.IniFilename()))
+		return;
+	if (const Section *section = ini.GetSection("Nintendo"))
+		section->Get("PreferredCore", &preferredNintendoCore_);
+	if (const Section *section = ini.GetSection("RetroControls")) {
+		for (unsigned id = 0; id < 16; ++id) {
+			std::string value;
+			section->Get(RetroButtonNames[id], &value);
+			if (!value.empty()) {
+				const int keyCode = std::atoi(value.c_str());
+				if (keyCode > 0)
+					RetroHost::Instance().SetControllerKeyMapping(id, keyCode);
+			}
+		}
+	}
+}
+
+void RetroScreen::SaveNintendoCorePreference() {
+	IniFile ini;
+	ini.Load(g_Config.IniFilename());
+	ini.GetOrCreateSection("Nintendo")->Set("PreferredCore", preferredNintendoCore_);
+	ini.Save(g_Config.IniFilename());
+}
+
+void RetroScreen::SaveControllerMapping(unsigned id) {
+	IniFile ini;
+	ini.Load(g_Config.IniFilename());
+	const int keyCode = RetroHost::Instance().ControllerKeyMapping(id);
+	ini.GetOrCreateSection("RetroControls")->Set(RetroButtonNames[id], std::to_string(keyCode));
+	ini.Save(g_Config.IniFilename());
+}
 
 void RetroScreen::RefreshStatus() {
 	IniFile ini;
@@ -66,7 +109,7 @@ void RetroScreen::CreateViews() {
 	LinearLayout *top = root_->Add(new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, Margins(18, 0, 18, 10))));
 	top->SetSpacing(8.0f);
 
-	for (int i = 0; i < 5; ++i) {
+	for (int i = 0; i < 6; ++i) {
 		Choice *choice = top->Add(new Choice(Categories[i], new LinearLayoutParams(i == 0 ? 1.2f : 1.0f, WRAP_CONTENT)));
 		choice->SetTag(std::to_string(i));
 		choice->OnClick.Add([this, i](UI::EventParams &) {
@@ -125,6 +168,7 @@ void RetroScreen::CreateViews() {
 		psp->SetBG(UI::Drawable(0xE0141D38));
 		psp->Add(new TextView("PSP  //  NATIVE", ALIGN_LEFT, true, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, Margins(16, 14, 16, 2))));
 		psp->Add(new TextView("One-click browser, native Vulkan/OpenGL rendering and ARM64 JIT.", ALIGN_LEFT | FLAG_WRAP_TEXT, false, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, Margins(16, 0, 16, 14))));
+		psp->Add(new TextView("Native loader formats include .iso, .cso, .chd, .pbp, .elf and .cue. ZIP archives with supported disc images can be opened; install or extract 7z archives first.", ALIGN_LEFT | FLAG_WRAP_TEXT, false, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, Margins(16, 0, 16, 14))));
 		psp->Add(new Choice("BROWSE & LOAD PSP GAME", new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT, Margins(16, 0, 16, 16))))->OnClick.Add([this](UI::EventParams &) {
 			System_BrowseForFile(GetRequesterToken(), "Load PSP game", BrowseFileType::BOOTABLE,
 				[](std::string_view value, int) { System_PostUIMessage(UIMessage::REQUEST_GAME_BOOT, value); });
@@ -133,17 +177,82 @@ void RetroScreen::CreateViews() {
 	} else if (category_ == 2) {
 		body->Add(new TextView(status_, ALIGN_LEFT | FLAG_WRAP_TEXT, false));
 		body->Add(new TextView("ARMSX2 BIOS: system/pcsx2/bios", ALIGN_LEFT, false));
-		body->Add(new TextView("ARMSX2 requires Vulkan >= 1.1 and a valid PS2 BIOS.", ALIGN_LEFT | FLAG_WRAP_TEXT, false));
+		std::string availablePs2Cores = "Available PS2 cores: ";
+		bool foundPs2Core = false;
+		for (const RetroHost::CoreCandidate &candidate : RetroHost::CoreCandidates(RETRO_PS2)) {
+			if (!RetroHost::Instance().IsCoreAvailable(RETRO_PS2, candidate.file))
+				continue;
+			if (foundPs2Core)
+				availablePs2Cores += "; ";
+			availablePs2Cores += candidate.name + " (" + candidate.description + ")";
+			foundPs2Core = true;
+		}
+		if (!foundPs2Core)
+			availablePs2Cores += "none";
+		body->Add(new TextView(availablePs2Cores, ALIGN_LEFT | FLAG_WRAP_TEXT, false));
+		body->Add(new TextView("If optional Play! is absent, compatible images fall back to ARMSX2. Select the .cue file for a .bin/.cue disc.", ALIGN_LEFT | FLAG_WRAP_TEXT, false));
+		body->Add(new TextView("ARMSX2 requires Vulkan >= 1.1 and a valid PS2 BIOS. Play! does not use the ARMSX2 BIOS.", ALIGN_LEFT | FLAG_WRAP_TEXT, false));
 		body->Add(new Choice("CHOOSE PS2 BIOS"))->OnClick.Add([this](UI::EventParams &) { BrowseBios(); });
-		body->Add(new Choice("CHOOSE ARMSX2 CORE"))->OnClick.Add([this](UI::EventParams &) { BrowseCustomCore(); });
+		body->Add(new Choice("CHOOSE PS2 CORE (.so)"))->OnClick.Add([this](UI::EventParams &) { BrowseCustomCore(); });
 		body->Add(new Choice("LOAD PS2 GAME"))->OnClick.Add([this](UI::EventParams &) { BrowsePs2Game(); });
 	} else if (category_ == 3) {
 		body->Add(new TextView("NINTENDO ARM64 CORES", ALIGN_LEFT, true));
+		body->Add(new TextView("Choose the preferred core. GB/GBC games can use Gambatte or SameBoy; other systems select their compatible core. Extract ZIP/7z archives before loading Nintendo ROMs.", ALIGN_LEFT | FLAG_WRAP_TEXT, false));
+		for (const RetroHost::CoreCandidate &candidate : RetroHost::CoreCandidates(RETRO_NINTENDO)) {
+			const bool selected = preferredNintendoCore_ == candidate.file;
+			const bool available = RetroHost::Instance().IsCoreAvailable(RETRO_NINTENDO, candidate.file);
+			Choice *coreChoice = body->Add(new Choice(candidate.name + (selected ? "  [SELECTED]" : "") + " — " + candidate.description));
+			coreChoice->SetEnabled(available);
+			coreChoice->OnClick.Add([this, candidate](UI::EventParams &) {
+				preferredNintendoCore_ = candidate.file;
+				SaveNintendoCorePreference();
+				status_ = "Preferred core: " + candidate.name;
+				RecreateViews();
+			});
+		}
 		body->Add(new Choice("SCAN NINTENDO ROM FOLDER"))->OnClick.Add([this](UI::EventParams &) { BrowseNintendoFolder(); });
 		body->Add(new Choice("QUICK LOAD GB/GBC/GBA/NDS ROM"))->OnClick.Add([this](UI::EventParams &) { BrowseNintendoGame(); });
 		body->Add(new TextView("PS3", ALIGN_LEFT, true));
 		body->Add(new TextView("No stable open ARM64 libretro core is currently available.", ALIGN_LEFT | FLAG_WRAP_TEXT, false));
 		body->Add(new Choice("SCAN PS3 IMAGE"))->OnClick.Add([this](UI::EventParams &) { BrowsePs3Image(); });
+	} else if (category_ == 4) {
+		body->Add(new TextView("INPUT MAPPING", ALIGN_LEFT, true));
+		body->Add(new TextView("Tap a control, then press a key or gamepad button to bind it.", ALIGN_LEFT | FLAG_WRAP_TEXT, false));
+		for (unsigned id = 0; id < 16; ++id) {
+			const int keyCode = RetroHost::Instance().ControllerKeyMapping(id);
+			const std::string keyName = keyCode > 0 ? KeyMap::GetKeyName(static_cast<InputKeyCode>(keyCode)) : "Unmapped";
+			Choice *mapping = body->Add(new Choice(std::string("MAP ") + RetroButtonNames[id] + ": " + keyName));
+			mapping->OnClick.Add([this, id](UI::EventParams &) {
+				mappingTarget_ = static_cast<int>(id);
+				status_ = std::string("Press a key or gamepad button for ") + RetroButtonNames[id];
+				RecreateViews();
+			});
+		}
+		body->Add(new TextView(status_, ALIGN_LEFT | FLAG_WRAP_TEXT, false));
+		Choice *slotChoice = body->Add(new Choice("STATE SLOT: " + std::to_string(stateSlot_ + 1)));
+		slotChoice->SetEnabled(RetroHost::Instance().CanSaveState());
+		slotChoice->OnClick.Add([this](UI::EventParams &) {
+			stateSlot_ = (stateSlot_ + 1) % 10;
+			RecreateViews();
+		});
+		Choice *saveState = body->Add(new Choice("SAVE STATE  (SLOT " + std::to_string(stateSlot_ + 1) + ")"));
+		saveState->SetEnabled(RetroHost::Instance().CanSaveState());
+		Choice *loadState = body->Add(new Choice("LOAD STATE  (SLOT " + std::to_string(stateSlot_ + 1) + ")"));
+		loadState->SetEnabled(RetroHost::Instance().CanSaveState());
+		saveState->OnClick.Add([this](UI::EventParams &) {
+			if (RetroHost::Instance().SaveStateToSlot(stateSlot_))
+				status_ = "Saved state to slot " + std::to_string(stateSlot_ + 1) + ".";
+			else
+				status_ = "Save state failed: " + RetroHost::Instance().LastError();
+			RecreateViews();
+		});
+		loadState->OnClick.Add([this](UI::EventParams &) {
+			if (RetroHost::Instance().LoadStateFromSlot(stateSlot_))
+				status_ = "Loaded state from slot " + std::to_string(stateSlot_ + 1) + ".";
+			else
+				status_ = "Load state failed: " + RetroHost::Instance().LastError();
+			RecreateViews();
+		});
 	} else {
 		body->Add(new TextView(status_, ALIGN_LEFT, false));
 		body->Add(new TextView("Build: ARM64 Normal Debug", ALIGN_LEFT, false));
@@ -218,15 +327,29 @@ void RetroScreen::BrowseBios() {
 void RetroScreen::BrowsePs2Game() {
 	System_BrowseForFile(GetRequesterToken(), "Load PS2 game", BrowseFileType::BOOTABLE,
 		[this](std::string_view value, int) {
-			ps2GamePath_ = value;
-			if (customCorePath_.empty()) {
-				customCorePath_ = RetroHost::Instance().ResolveCorePath(RETRO_PS2);
+https://github.com/PSPforkSchnitter/emulatorpsschnitter			Path selectedPath{ std::string(value) };
+		std::string extension = selectedPath.GetFileExtension();
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		if (extension == ".bin") {
+				Path cuePath = selectedPath.WithReplacedExtension(".cue");
+				if (File::Exists(cuePath))
+					selectedPath = cuePath;
 			}
+			ps2GamePath_ = selectedPath.ToString();
+			const std::string resolvedCorePath = RetroHost::ResolveCoreForContent(RETRO_PS2, ps2GamePath_);
+			const auto candidates = RetroHost::CoreCandidates(RETRO_PS2);
+			const bool isBundledCore = std::any_of(candidates.begin(), candidates.end(), [this](const RetroHost::CoreCandidate &candidate) {
+				return Path(customCorePath_).GetFilename() == candidate.file;
+			});
+			if (customCorePath_.empty() || isBundledCore)
+				customCorePath_ = resolvedCorePath;
 			const std::string systemDir = GetSysDirectory(DIRECTORY_PSP).ToString() + "/SYSTEM";
 			File::CreateFullPath(Path(systemDir) / "pcsx2" / "bios");
 			File::CreateFullPath(Path(systemDir) / "pcsx2" / "resources");
 			if (customCorePath_.empty()) {
-				status_ = "PS2 core not found. Attach armsx2_libretro.so.";
+				status_ = "No compatible PS2 core found for this file. Supported: .cue/.bin pair, .iso, .chd, .cso, .elf.";
 			} else if (!RetroHost::Instance().LoadContent(customCorePath_, ps2GamePath_)) {
 				status_ = "PS2 load blocked: " + RetroHost::Instance().LastError();
 			} else {
@@ -252,7 +375,7 @@ void RetroScreen::BrowseNintendoGame() {
 	System_BrowseForFile(GetRequesterToken(), "Load Nintendo ROM", BrowseFileType::ANY,
 		[this](std::string_view value, int) {
 			nintendoRomPath_ = value;
-			std::string corePath = RetroHost::ResolveCoreForContent(RETRO_NINTENDO, nintendoRomPath_);
+			std::string corePath = RetroHost::ResolveCoreForContent(RETRO_NINTENDO, nintendoRomPath_, preferredNintendoCore_);
 			if (corePath.empty()) {
 				status_ = "Unsupported ROM format. Use GB, GBC, GBA, NDS or DSI.";
 			} else if (!RetroHost::Instance().LoadContent(RETRO_NINTENDO, corePath, nintendoRomPath_)) {
@@ -345,28 +468,24 @@ void RetroScreen::DrawBackground(UIContext &dc) {
 }
 
 bool RetroScreen::key(const KeyInput &key) {
+	if (mappingTarget_ >= 0) {
+		if (key.flags & KeyInputFlags::DOWN) {
+			const unsigned id = static_cast<unsigned>(mappingTarget_);
+			if (RetroHost::Instance().SetControllerKeyMapping(id, key.keyCode)) {
+				SaveControllerMapping(id);
+				status_ = std::string("Mapped ") + RetroButtonNames[id] + " to " +
+					KeyMap::GetKeyName(static_cast<InputKeyCode>(key.keyCode));
+			} else {
+				status_ = "Could not map that key.";
+			}
+			mappingTarget_ = -1;
+			RecreateViews();
+		}
+		return true;
+	}
 	if (RetroHost::Instance().IsLoaded()) {
-		const int16_t pressed = (key.flags & KeyInputFlags::DOWN) ? 1 : 0;
-		unsigned retroId = 0xFFFF;
-		switch (key.keyCode) {
-		case NKCODE_DPAD_UP: retroId = 4; break;
-		case NKCODE_DPAD_DOWN: retroId = 5; break;
-		case NKCODE_DPAD_LEFT: retroId = 6; break;
-		case NKCODE_DPAD_RIGHT: retroId = 7; break;
-		case NKCODE_BUTTON_B: retroId = 0; break;
-		case NKCODE_BUTTON_Y: retroId = 1; break;
-		case NKCODE_BUTTON_SELECT: retroId = 2; break;
-		case NKCODE_BUTTON_START: retroId = 3; break;
-		case NKCODE_BUTTON_A: retroId = 8; break;
-		case NKCODE_BUTTON_X: retroId = 9; break;
-		case NKCODE_BUTTON_L1: retroId = 10; break;
-		case NKCODE_BUTTON_R1: retroId = 11; break;
-		default: break;
-		}
-		if (retroId != 0xFFFF) {
-			RetroHost::Instance().SetControllerState(retroId, pressed);
+		if (RetroHost::Instance().SetControllerKeyState(key.keyCode, key.flags & KeyInputFlags::DOWN))
 			return true;
-		}
 	}
 	if (key.flags & KeyInputFlags::DOWN) {
 		bool moved = true;
@@ -375,7 +494,7 @@ bool RetroScreen::key(const KeyInput &key) {
 			category_ = std::max(0, category_ - 1);
 			break;
 		case NKCODE_DPAD_RIGHT:
-			category_ = std::min(4, category_ + 1);
+			category_ = std::min(5, category_ + 1);
 			break;
 		case NKCODE_DPAD_UP:
 			item_ = std::max(0, item_ - 1);

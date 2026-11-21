@@ -57,11 +57,7 @@ val gitVersionCode =
 		patch * 10_000 +
 		commitsSinceTag).coerceAtLeast(1)
 
-val selectedAbis = if (project.hasProperty("ABI_FILTERS")) {
-	(project.property("ABI_FILTERS") as String).split(",").map { it.trim() }.filter { it.isNotEmpty() }
-} else {
-	listOf("armeabi-v7a", "arm64-v8a", "x86_64")
-}
+val selectedAbis = listOf("arm64-v8a")
 
 dependencies {
 	// appcompat 1.8.0 and later need minSdk 23.

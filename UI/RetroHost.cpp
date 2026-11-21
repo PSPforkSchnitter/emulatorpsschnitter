@@ -4,11 +4,13 @@
 #include <dlfcn.h>
 #endif
 
+#include <algorithm>
 #include <cstring>
 #include <cstdio>
 #include <cctype>
 #include <dirent.h>
 #include <mutex>
+#include <vector>
 
 #include "Common/Log.h"
 #include "Common/File/FileUtil.h"
@@ -29,11 +31,9 @@ using retro_audio_sample_batch_t = size_t (*)(const int16_t *, size_t);
 using retro_input_poll_t = void (*)(void);
 using retro_input_state_t = int16_t (*)(unsigned, unsigned, unsigned, unsigned);
 
-static RetroHost *s_host;
 static RetroPixelFormat s_pixelFormat = RETRO_PIXEL_FORMAT_XRGB8888;
 static bool s_ps2HwRenderRequested = false;
 static bool s_ps2VulkanSupported = false;
-static int16_t s_retroJoypadState[16] = {};
 
 struct RetroLogInterface {
 	unsigned (*getLevel)(void);
@@ -64,6 +64,39 @@ std::string RetroHost::LastError() const {
 	return lastError_;
 }
 
+int32_t RetroHost::ConvertAudioSample(int16_t sample) {
+	return static_cast<int32_t>(sample) * 65536;
+}
+
+std::string RetroHost::StateFilePath(const std::string &saveDirectory, const std::string &corePath, const std::string &contentPath, unsigned slot) {
+	if (slot >= 10)
+		return {};
+	uint64_t hash = 14695981039346656037ull;
+	auto addToHash = [&hash](const std::string &value) {
+		for (unsigned char ch : value) {
+			hash ^= ch;
+			hash *= 1099511628211ull;
+		}
+		hash ^= 0xFF;
+		hash *= 1099511628211ull;
+	};
+	addToHash(corePath);
+	addToHash(contentPath);
+	char filename[40];
+	std::snprintf(filename, sizeof(filename), "%016llx.slot%u.state", static_cast<unsigned long long>(hash), slot);
+	return saveDirectory + "/retro_states/" + filename;
+}
+
+bool RetroHost::CanSaveState() const {
+	std::lock_guard<std::recursive_mutex> lock(coreMutex_);
+	return contentLoaded_ && retro_serialize_size_ && retro_serialize_ && retro_unserialize_;
+}
+
+bool RetroHost::IsLoaded() const {
+	std::lock_guard<std::recursive_mutex> lock(coreMutex_);
+	return contentLoaded_;
+}
+
 std::string RetroHost::CoreForCategory(RetroCoreCategory category) {
 	auto candidates = CoreCandidates(category);
 	if (candidates.empty())
@@ -74,7 +107,10 @@ std::string RetroHost::CoreForCategory(RetroCoreCategory category) {
 std::vector<RetroHost::CoreCandidate> RetroHost::CoreCandidates(RetroCoreCategory category) {
 	switch (category) {
 	case RETRO_PS2:
-		return { MakeCandidate("ARMSX2", "armsx2_libretro.so", "ARM64 PS2 libretro core (Vulkan)") };
+		return {
+			MakeCandidate("ARMSX2", "armsx2_libretro.so", "PS2: .iso, .chd, .cso, .elf; fallback for .cue/.bin"),
+			MakeCandidate("Play!", "play_libretro_android.so", "PS2: .cue, .iso, .chd, .cso (optional core)"),
+		};
 	case RETRO_NINTENDO:
 		return {
 			MakeCandidate("Gambatte", "gambatte_libretro_android.so", "Game Boy / Game Boy Color"),
@@ -87,26 +123,65 @@ std::vector<RetroHost::CoreCandidate> RetroHost::CoreCandidates(RetroCoreCategor
 	}
 }
 
-std::string RetroHost::ResolveCoreForContent(RetroCoreCategory category, const std::string &contentPath) {
+std::string RetroHost::ResolveCoreForContent(RetroCoreCategory category, const std::string &contentPath, const std::string &preferredCore) {
 	std::string lower = contentPath;
 	for (char &ch : lower)
 		ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
 	const auto lastDot = lower.find_last_of('.');
 	const std::string extension = lastDot == std::string::npos ? std::string() : lower.substr(lastDot);
-	std::string candidate;
+	std::vector<std::string> candidates;
 	if (category == RETRO_NINTENDO) {
 		if (extension == ".nds" || extension == ".dsi")
-			candidate = "melonds_libretro_android.so";
+			candidates = { "melonds_libretro_android.so" };
 		else if (extension == ".gba")
-			candidate = "mgba_libretro_android.so";
+			candidates = { "mgba_libretro_android.so" };
 		else if (extension == ".gb" || extension == ".gbc" || extension == ".sgb")
-			candidate = "gambatte_libretro_android.so";
+			candidates = { "gambatte_libretro_android.so", "sameboy_libretro_android.so" };
+	} else if (category == RETRO_PS2) {
+		if (extension == ".cue" || extension == ".bin") {
+			const Path cuePath = extension == ".bin" ? Path(contentPath).WithReplacedExtension(".cue") : Path(contentPath);
+			if (extension == ".cue" || File::Exists(cuePath))
+				candidates = { "play_libretro_android.so", "armsx2_libretro.so" };
+		} else if (extension == ".iso" || extension == ".chd" || extension == ".cso") {
+			candidates = { "armsx2_libretro.so", "play_libretro_android.so" };
+		} else if (extension == ".elf") {
+			candidates = { "armsx2_libretro.so" };
+		}
 	}
-	if (candidate.empty())
+	if (candidates.empty())
 		return {};
-	const std::string nativeDir = Instance().nativeLibDir_;
-	const std::string path = nativeDir.empty() ? candidate : nativeDir + "/" + candidate;
-	return File::Exists(Path(path)) ? path : std::string();
+
+	if (!preferredCore.empty()) {
+		auto preferred = std::find(candidates.begin(), candidates.end(), preferredCore);
+		if (preferred != candidates.end())
+			std::rotate(candidates.begin(), preferred, preferred + 1);
+	}
+
+	std::string nativeDir;
+	{
+		RetroHost &host = Instance();
+		std::lock_guard<std::mutex> lock(host.mutex_);
+		nativeDir = host.nativeLibDir_;
+	}
+	if (nativeDir.empty())
+		return {};
+	for (const std::string &candidate : candidates) {
+		const std::string path = nativeDir + "/" + candidate;
+		if (File::Exists(Path(path)))
+			return path;
+	}
+	return {};
+}
+
+bool RetroHost::IsCoreAvailable(RetroCoreCategory category, const std::string &coreFile) const {
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (nativeLibDir_.empty())
+		return false;
+	for (const auto &candidate : CoreCandidates(category)) {
+		if (candidate.file == coreFile)
+			return File::Exists(Path(nativeLibDir_ + "/" + candidate.file));
+	}
+	return false;
 }
 
 std::string RetroHost::ResolveCorePath(RetroCoreCategory category) const {
@@ -123,48 +198,29 @@ std::string RetroHost::ResolveCorePath(RetroCoreCategory category) const {
 	return {};
 }
 
-static RetroHost *ActiveHost() {
-	return &RetroHost::Instance();
-}
-
-static void VideoRefresh(const void *data, unsigned width, unsigned height, size_t pitch) {
-	RetroHost *host = ActiveHost();
-	if (!data || !width || !height)
-		return;
-	std::vector<uint32_t> pixels(width * height);
-	const uint8_t *src = static_cast<const uint8_t *>(data);
-	for (unsigned y = 0; y < height; ++y) {
-		const uint8_t *row = src + y * pitch;
-		for (unsigned x = 0; x < width; ++x) {
-			uint32_t rgba;
-			switch (0) { // set below from host pixel format
-			default:
-				rgba = 0xFF000000u;
-				break;
-			}
-			pixels[y * width + x] = rgba;
-		}
-	}
-	// XRGB8888 is the normal PPSSPP-libretro path. Host-specific conversion is
-	// completed below by copying in the common 32-bit format when available.
-	host->GetFrame(nullptr, nullptr, nullptr); // initialize synchronization access
-}
-
 static size_t AudioBatch(const int16_t *data, size_t frames) {
 	if (!data)
 		return frames;
-	std::vector<int32_t> mixed(frames * 2);
-	for (size_t i = 0; i < frames * 2; ++i) {
-		uint32_t sample = static_cast<uint16_t>(data[i]);
-		mixed[i] = static_cast<int32_t>(sample) << 16;
+	const size_t totalFrames = frames;
+	constexpr size_t maxBatchFrames = 1024;
+	std::array<int32_t, maxBatchFrames * 2> mixed;
+	while (frames > 0) {
+		const size_t batchFrames = std::min(frames, maxBatchFrames);
+		for (size_t i = 0; i < batchFrames * 2; ++i)
+			mixed[i] = RetroHost::ConvertAudioSample(data[i]);
+		System_AudioPushSamples(mixed.data(), static_cast<int>(batchFrames), 1.0f);
+		data += batchFrames * 2;
+		frames -= batchFrames;
 	}
-	System_AudioPushSamples(mixed.data(), static_cast<int>(frames * 2), 1.0f);
-	return frames;
+	return totalFrames;
 }
 
 static void AudioSample(int16_t left, int16_t right) {
-	int32_t stereo = (static_cast<uint32_t>(static_cast<uint16_t>(left)) << 16) | static_cast<uint16_t>(right);
-	System_AudioPushSamples(&stereo, 2, 1.0f);
+	const int32_t stereo[] = {
+		RetroHost::ConvertAudioSample(left),
+		RetroHost::ConvertAudioSample(right),
+	};
+	System_AudioPushSamples(stereo, 1, 1.0f);
 }
 
 static void InputPoll() {}
@@ -174,7 +230,7 @@ static int16_t InputState(unsigned port, unsigned device, unsigned index, unsign
 	(void)device;
 	(void)index;
 	if (port == 0 && device == 1 && id < 16)
-		return s_retroJoypadState[id];
+		return RetroHost::Instance().ControllerState(id);
 	return 0;
 }
 
@@ -349,6 +405,7 @@ static bool Environment(unsigned cmd, void *data) {
 }
 
 bool RetroHost::LoadCore(RetroCoreCategory category, const std::string &corePath) {
+	std::lock_guard<std::recursive_mutex> coreLock(coreMutex_);
 	std::lock_guard<std::mutex> lock(mutex_);
 	Shutdown();
 	lastError_.clear();
@@ -375,6 +432,9 @@ bool RetroHost::LoadCore(RetroCoreCategory category, const std::string &corePath
 	DLSYM("retro_load_game", retro_load_game_);
 	DLSYM("retro_unload_game", retro_unload_game_);
 	DLSYM("retro_run", retro_run_);
+	DLSYM("retro_serialize_size", retro_serialize_size_);
+	DLSYM("retro_serialize", retro_serialize_);
+	DLSYM("retro_unserialize", retro_unserialize_);
 	DLSYM("retro_set_controller_port_device", retro_set_controller_port_device_);
 #undef DLSYM
 
@@ -434,6 +494,7 @@ bool RetroHost::LoadCore(RetroCoreCategory category, const std::string &corePath
 	setInputState(InputState);
 	retro_init_();
 	loaded_ = true;
+	loadedCorePath_ = path;
 	return true;
 #endif
 }
@@ -443,8 +504,9 @@ bool RetroHost::LoadContent(const std::string &corePath, const std::string &cont
 }
 
 bool RetroHost::LoadContent(RetroCoreCategory category, const std::string &corePath, const std::string &contentPath) {
+	std::lock_guard<std::recursive_mutex> coreLock(coreMutex_);
 	const std::string systemDir = GetSysDirectory(DIRECTORY_PSP).ToString() + "/SYSTEM";
-	if (category == RETRO_PS2) {
+	if (category == RETRO_PS2 && Path(corePath).GetFilename() != "play_libretro_android.so") {
 		std::string biosDescription;
 		if (!ValidatePs2BiosDirectory(systemDir, &biosDescription)) {
 			lastError_ = biosDescription;
@@ -463,6 +525,7 @@ bool RetroHost::LoadContent(RetroCoreCategory category, const std::string &coreP
 	info.path = contentPath.c_str();
 	if (!retro_load_game_(&info)) {
 		lastError_ = "Libretro core rejected the content";
+		Shutdown();
 		return false;
 	}
 	if (s_ps2HwRenderRequested && !s_ps2VulkanSupported) {
@@ -471,24 +534,142 @@ bool RetroHost::LoadContent(RetroCoreCategory category, const std::string &coreP
 			retro_unload_game_();
 		return false;
 	}
+	loadedContentPath_ = contentPath;
+	contentLoaded_ = true;
 	return true;
 }
 
 void RetroHost::RunFrame() {
-	if (loaded_ && retro_run_)
+	std::lock_guard<std::recursive_mutex> lock(coreMutex_);
+	if (contentLoaded_ && retro_run_)
 		retro_run_();
 }
 
 void RetroHost::SetControllerState(unsigned id, int16_t value) {
 	if (id < 16)
-		s_retroJoypadState[id] = value;
+		controllerState_[id].store(value, std::memory_order_relaxed);
+}
+
+int16_t RetroHost::ControllerState(unsigned id) const {
+	if (id >= controllerState_.size())
+		return 0;
+	return controllerState_[id].load(std::memory_order_relaxed);
+}
+
+bool RetroHost::SetControllerKeyMapping(unsigned id, int keyCode) {
+	if (id >= controllerKeyMapping_.size() || keyCode <= 0)
+		return false;
+	std::lock_guard<std::mutex> lock(inputMutex_);
+	controllerKeyMapping_[id] = keyCode;
+	controllerState_[id].store(0, std::memory_order_relaxed);
+	return true;
+}
+
+int RetroHost::ControllerKeyMapping(unsigned id) const {
+	if (id >= controllerKeyMapping_.size())
+		return -1;
+	std::lock_guard<std::mutex> lock(inputMutex_);
+	return controllerKeyMapping_[id];
+}
+
+bool RetroHost::SetControllerKeyState(int keyCode, bool pressed) {
+	std::lock_guard<std::mutex> lock(inputMutex_);
+	bool mapped = false;
+	for (size_t id = 0; id < controllerKeyMapping_.size(); ++id) {
+		if (controllerKeyMapping_[id] == keyCode) {
+			controllerState_[id].store(pressed ? 1 : 0, std::memory_order_relaxed);
+			mapped = true;
+		}
+	}
+	return mapped;
+}
+
+bool RetroHost::SaveStateToSlot(unsigned slot) {
+	std::lock_guard<std::recursive_mutex> lock(coreMutex_);
+	if (!CanSaveState()) {
+		lastError_ = "This libretro core does not support save states or no game is loaded";
+		return false;
+	}
+	const size_t stateSize = retro_serialize_size_();
+	if (!stateSize || stateSize > 512ull * 1024 * 1024) {
+		lastError_ = "Core returned an invalid save-state size";
+		return false;
+	}
+	const std::string saveDirectory = GetSysDirectory(DIRECTORY_PSP).ToString() + "/SYSTEM/save";
+	const std::string statePathString = StateFilePath(saveDirectory, Path(loadedCorePath_).GetFilename(), loadedContentPath_, slot);
+	if (statePathString.empty()) {
+		lastError_ = "Save-state slot must be between 1 and 10";
+		return false;
+	}
+	if (!File::CreateFullPath(Path(saveDirectory + "/retro_states"))) {
+		lastError_ = "Could not create the save-state directory";
+		return false;
+	}
+
+	std::vector<uint8_t> state(stateSize);
+	if (!retro_serialize_(state.data(), state.size())) {
+		lastError_ = "The libretro core failed to serialize its state";
+		return false;
+	}
+
+	Path tempPath(statePathString + ".tmp");
+	File::IOFile file(tempPath, "wb");
+	if (!file || !file.WriteBytes(state.data(), state.size()) || !file.Flush() || !file.Close()) {
+		File::Delete(tempPath, true);
+		lastError_ = "Could not write the save-state file";
+		return false;
+	}
+	if (!File::Rename(tempPath, Path(statePathString))) {
+		File::Delete(tempPath, true);
+		lastError_ = "Could not finalize the save-state file";
+		return false;
+	}
+	lastError_.clear();
+	return true;
+}
+
+bool RetroHost::LoadStateFromSlot(unsigned slot) {
+	std::lock_guard<std::recursive_mutex> lock(coreMutex_);
+	if (!CanSaveState()) {
+		lastError_ = "This libretro core does not support save states or no game is loaded";
+		return false;
+	}
+	const std::string saveDirectory = GetSysDirectory(DIRECTORY_PSP).ToString() + "/SYSTEM/save";
+	const std::string statePathString = StateFilePath(saveDirectory, Path(loadedCorePath_).GetFilename(), loadedContentPath_, slot);
+	if (statePathString.empty()) {
+		lastError_ = "Save-state slot must be between 1 and 10";
+		return false;
+	}
+
+	File::IOFile file(Path(statePathString), "rb");
+	if (!file) {
+		lastError_ = "Save-state slot is empty";
+		return false;
+	}
+	const size_t stateSize = retro_serialize_size_();
+	if (!stateSize || stateSize > 512ull * 1024 * 1024 || file.GetSize() != stateSize) {
+		lastError_ = "Save-state size does not match the loaded core";
+		return false;
+	}
+	std::vector<uint8_t> state(stateSize);
+	if (!file.ReadBytes(state.data(), state.size()) || !file.Close()) {
+		lastError_ = "Could not read the save-state file";
+		return false;
+	}
+	if (!retro_unserialize_(state.data(), state.size())) {
+		lastError_ = "The libretro core rejected the save-state";
+		return false;
+	}
+	lastError_.clear();
+	return true;
 }
 
 void RetroHost::Shutdown() {
-	if (retro_deinit_)
-		retro_deinit_();
-	if (retro_unload_game_)
+	std::lock_guard<std::recursive_mutex> lock(coreMutex_);
+	if (contentLoaded_ && retro_unload_game_)
 		retro_unload_game_();
+	if (loaded_ && retro_deinit_)
+		retro_deinit_();
 #ifdef __ANDROID__
 	if (handle_)
 		dlclose(handle_);
@@ -499,8 +680,16 @@ void RetroHost::Shutdown() {
 	retro_load_game_ = nullptr;
 	retro_unload_game_ = nullptr;
 	retro_run_ = nullptr;
+	retro_serialize_size_ = nullptr;
+	retro_serialize_ = nullptr;
+	retro_unserialize_ = nullptr;
 	retro_set_controller_port_device_ = nullptr;
 	loaded_ = false;
+	contentLoaded_ = false;
+	for (auto &state : controllerState_)
+		state.store(0, std::memory_order_relaxed);
+	loadedCorePath_.clear();
+	loadedContentPath_.clear();
 }
 
 bool RetroHost::GetFrame(std::vector<uint32_t> *pixels, unsigned *width, unsigned *height) {

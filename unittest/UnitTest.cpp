@@ -4421,6 +4421,9 @@ bool TestGEMath();
 bool TestBoundingBoxFast();
 bool TestDepthRaster();
 bool TestDemangle();
+#ifdef PPSSPP_HAS_UI
+bool TestRetroHost();
+#endif
 
 // The 8.3 short names games read out of d_private. These aren't verified against hardware yet (no
 // pspautotest covers d_private), so this pins down the behavior we chose - notably that the counter
@@ -5171,6 +5174,9 @@ TestItem availableTests[] = {
 	TEST_ITEM(GEMath),
 	TEST_ITEM(DepthSwizzle),
 	TEST_ITEM(Demangle),
+#ifdef PPSSPP_HAS_UI
+	TEST_ITEM(RetroHost),
+#endif
 	TEST_ITEM(TextureReplacer),
 	TEST_ITEM(UITabOrder),
 	TEST_ITEM(UIFocusNavigation),

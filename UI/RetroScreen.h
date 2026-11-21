@@ -32,11 +32,17 @@ private:
 	void BrowseCustomCore();
 	void LoadCoreCandidate();
 	void RefreshStatus();
+	void LoadSettings();
+	void SaveNintendoCorePreference();
+	void SaveControllerMapping(unsigned id);
 
 	std::string ps2BiosPath_;
 	std::string ps2BiosRegion_;
 	std::string ps2GamePath_;
 	std::string nintendoRomPath_;
 	std::string customCorePath_;
+	std::string preferredNintendoCore_;
 	std::string status_;
+	int mappingTarget_ = -1;
+	unsigned stateSlot_ = 0;
 };

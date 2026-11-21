@@ -1,0 +1,137 @@
+name: Android ARM64 APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build packages
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses
+          set -o pipefail
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-37.2" \
+            "build-tools;37.0.0" \
+            "cmake;3.22.1" \
+            "ndk;29.0.14206865"
+
+      - name: Download ARM64 libretro cores
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_dir="android/src/main/jniLibs/arm64-v8a"
+          base_url="https://buildbot.libretro.com/nightly/android/latest/arm64-v8a"
+          mkdir -p "$core_dir"
+
+          download_core() {
+            local archive_name="$1"
+            local core_name="$2"
+            local required="$3"
+            local archive_file entry
+            archive_file="$(mktemp)"
+
+            if ! curl --fail --location --retry 3 --silent --show-error \
+              "$base_url/$archive_name" --output "$archive_file"; then
+              rm -f "$archive_file"
+              if [ "$required" = "required" ]; then
+                echo "::error::Could not download required core: $archive_name"
+                return 1
+              fi
+              echo "::warning::Optional core unavailable; ARMSX2 fallback will be used: $archive_name"
+              return 0
+            fi
+
+            entry="$(unzip -Z1 "$archive_file" | awk -v name="$core_name" \
+              '$0 == name || $0 ~ ("/" name "$") { print; exit }')"
+            if [ -z "$entry" ]; then
+              rm -f "$archive_file"
+              echo "::error::Archive does not contain $core_name"
+              return 1
+            fi
+
+            unzip -p "$archive_file" "$entry" > "$core_dir/$core_name"
+            rm -f "$archive_file"
+            if ! file "$core_dir/$core_name" | grep -q 'ELF 64-bit.*ARM aarch64'; then
+              echo "::error::Downloaded core is not an ARM64 ELF: $core_name"
+              return 1
+            fi
+          }
+
+          test -f "$core_dir/armsx2_libretro.so"
+          file "$core_dir/armsx2_libretro.so" | grep -q 'ELF 64-bit.*ARM aarch64'
+
+          download_core "gambatte_libretro_android.so.zip" "gambatte_libretro_android.so" required
+          download_core "sameboy_libretro_android.so.zip" "sameboy_libretro_android.so" required
+          download_core "mgba_libretro_android.so.zip" "mgba_libretro_android.so" required
+          download_core "melonds_libretro_android.so.zip" "melonds_libretro_android.so" required
+          download_core "play_libretro_android.so.zip" "play_libretro_android.so" optional
+
+      - name: Build ARM64 debug APK
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: '2'
+        run: >-
+          ./gradlew :android:assembleNormalDebug
+          --no-daemon
+          --max-workers=2
+          -Dorg.gradle.workers.max=2
+          -Dorg.gradle.jvmargs=-Xmx4g
+          -PABI_FILTERS=arm64-v8a
+
+      - name: Verify APK requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="android/build/outputs/apk/normal/debug/android-normal-debug.apk"
+          build_tools="$ANDROID_HOME/build-tools/37.0.0"
+          test -f "$apk"
+
+          "$build_tools/aapt" dump badging "$apk" | grep -F "sdkVersion:'29'"
+          "$build_tools/aapt" dump badging "$apk" | grep -F "targetSdkVersion:'37'"
+          "$build_tools/apksigner" verify "$apk"
+          "$build_tools/zipalign" -c -P 16 4 "$apk"
+
+          abis="$(unzip -Z1 "$apk" | awk -F/ '$1 == "lib" { print $2 }' | sort -u)"
+          test "$abis" = "arm64-v8a"
+          for core in armsx2_libretro.so gambatte_libretro_android.so \
+            sameboy_libretro_android.so mgba_libretro_android.so \
+            melonds_libretro_android.so; do
+            unzip -Z1 "$apk" | grep -Fx "lib/arm64-v8a/$core"
+          done
+          if [ -f android/src/main/jniLibs/arm64-v8a/play_libretro_android.so ]; then
+            unzip -Z1 "$apk" | grep -Fx "lib/arm64-v8a/play_libretro_android.so"
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-normal-debug-arm64
+          path: android/build/outputs/apk/normal/debug/android-normal-debug.apk
+          if-no-files-found: error
+          retention-days: 14
