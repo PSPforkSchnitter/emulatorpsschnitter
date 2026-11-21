@@ -1143,7 +1143,9 @@ LOCAL_SRC_FILES := \
   $(SRC)/UI/Theme.cpp \
   $(SRC)/UI/UIAtlas.cpp \
   $(SRC)/UI/CustomButtonMappingScreen.cpp \
-  $(SRC)/UI/RetroAchievementScreens.cpp
+  $(SRC)/UI/RetroAchievementScreens.cpp \
+  $(SRC)/UI/RetroHost.cpp \
+  $(SRC)/UI/RetroScreen.cpp
 
 # Calls between our own functions bind directly, not through the PLT (see CMakeLists.txt).
 LOCAL_LDFLAGS += -Wl,-Bsymbolic-functions

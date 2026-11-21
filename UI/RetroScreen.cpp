@@ -327,12 +327,12 @@ void RetroScreen::BrowseBios() {
 void RetroScreen::BrowsePs2Game() {
 	System_BrowseForFile(GetRequesterToken(), "Load PS2 game", BrowseFileType::BOOTABLE,
 		[this](std::string_view value, int) {
-https://github.com/PSPforkSchnitter/emulatorpsschnitter			Path selectedPath{ std::string(value) };
-		std::string extension = selectedPath.GetFileExtension();
-		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) {
-			return static_cast<char>(std::tolower(ch));
-		});
-		if (extension == ".bin") {
+			Path selectedPath{ std::string(value) };
+			std::string extension = selectedPath.GetFileExtension();
+			std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) {
+				return static_cast<char>(std::tolower(ch));
+			});
+			if (extension == ".bin") {
 				Path cuePath = selectedPath.WithReplacedExtension(".cue");
 				if (File::Exists(cuePath))
 					selectedPath = cuePath;
