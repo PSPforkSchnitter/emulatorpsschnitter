@@ -136,7 +136,7 @@ android {
 		file("versionname.txt").writeText(gitVersionName)
 		file("versioncode.txt").writeText(gitVersionCode.toString())
 
-		minSdk = 21
+		minSdk = 29
 		targetSdk = 37
 		if (project.hasProperty("ANDROID_VERSION_CODE") && project.hasProperty("ANDROID_VERSION_NAME")) {
 			versionCode = (project.property("ANDROID_VERSION_CODE") as String).toInt()

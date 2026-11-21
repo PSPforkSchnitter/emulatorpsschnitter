@@ -1,1 +1,4 @@
-jniLibs
+jniLibs/*
+!jniLibs/arm64-v8a/
+jniLibs/arm64-v8a/*
+!jniLibs/arm64-v8a/armsx2_libretro.so

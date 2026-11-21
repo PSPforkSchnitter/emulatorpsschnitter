@@ -21,8 +21,10 @@ public:
 	void SetExternalCoreDirectory(std::string_view directory);
 	bool LoadCore(RetroCoreCategory category, const std::string &corePath);
 	bool LoadContent(const std::string &corePath, const std::string &contentPath);
+	bool LoadContent(RetroCoreCategory category, const std::string &corePath, const std::string &contentPath);
 	void RunFrame();
 	void Shutdown();
+	void SetControllerState(unsigned id, int16_t value);
 
 	bool IsLoaded() const { return loaded_; }
 	std::string LastError() const;
@@ -36,6 +38,8 @@ public:
 	static std::vector<CoreCandidate> CoreCandidates(RetroCoreCategory category);
 	static std::string CoreForCategory(RetroCoreCategory category);
 	std::string ResolveCorePath(RetroCoreCategory category) const;
+	static std::string ResolveCoreForContent(RetroCoreCategory category, const std::string &contentPath);
+	static bool ValidatePs2BiosDirectory(const std::string &systemDirectory, std::string *description = nullptr);
 
 private:
 	RetroHost() = default;

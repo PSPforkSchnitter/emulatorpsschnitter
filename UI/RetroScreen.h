@@ -25,6 +25,8 @@ private:
 
 	void BrowseBios();
 	void BrowsePs2Game();
+	void BrowsePspFolder();
+	void BrowseNintendoGame();
 	void BrowseNintendoFolder();
 	void BrowsePs3Image();
 	void BrowseCustomCore();
@@ -34,6 +36,7 @@ private:
 	std::string ps2BiosPath_;
 	std::string ps2BiosRegion_;
 	std::string ps2GamePath_;
+	std::string nintendoRomPath_;
 	std::string customCorePath_;
 	std::string status_;
 };

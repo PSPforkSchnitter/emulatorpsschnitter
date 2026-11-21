@@ -398,7 +398,7 @@ void MainScreen::CreateMainButtons(UI::LinearLayout *parent, bool portrait) {
 		if (System_GetPropertyBool(SYSPROP_HAS_FILE_BROWSER)) {
 			mainButtons->Add(new Choice(mm->T("Load", "Load...")))->OnClick.Handle(this, &MainScreen::OnLoadFile);
 		}
-		mainButtons->Add(new Choice("Retro XMB"))->OnClick.Handle(this, &MainScreen::OnRetroHub);
+		mainButtons->Add(new Choice("PSP5 Hub"))->OnClick.Handle(this, &MainScreen::OnRetroHub);
 		mainButtons->Add(new Choice(mm->T("Game Settings", "Settings")))->OnClick.Handle(this, &MainScreen::OnGameSettings);
 		mainButtons->Add(new Choice(mm->T("About PPSSPP")))->OnClick.Handle(this, &MainScreen::OnCredits);
 		mainButtons->Add(new Choice(mm->T("www.ppsspp.org")))->OnClick.Handle(this, &MainScreen::OnPPSSPPOrg);

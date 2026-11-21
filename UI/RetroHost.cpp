@@ -5,6 +5,9 @@
 #endif
 
 #include <cstring>
+#include <cstdio>
+#include <cctype>
+#include <dirent.h>
 #include <mutex>
 
 #include "Common/Log.h"
@@ -28,6 +31,14 @@ using retro_input_state_t = int16_t (*)(unsigned, unsigned, unsigned, unsigned);
 
 static RetroHost *s_host;
 static RetroPixelFormat s_pixelFormat = RETRO_PIXEL_FORMAT_XRGB8888;
+static bool s_ps2HwRenderRequested = false;
+static bool s_ps2VulkanSupported = false;
+static int16_t s_retroJoypadState[16] = {};
+
+struct RetroLogInterface {
+	unsigned (*getLevel)(void);
+	void (*log)(unsigned level, const char *fmt, ...);
+};
 
 static RetroHost::CoreCandidate MakeCandidate(const char *name, const char *file, const char *description) {
 	return { name, file, description };
@@ -63,7 +74,7 @@ std::string RetroHost::CoreForCategory(RetroCoreCategory category) {
 std::vector<RetroHost::CoreCandidate> RetroHost::CoreCandidates(RetroCoreCategory category) {
 	switch (category) {
 	case RETRO_PS2:
-		return { MakeCandidate("Play!", "play_libretro_android.so", "ARM64 PS2 libretro core") };
+		return { MakeCandidate("ARMSX2", "armsx2_libretro.so", "ARM64 PS2 libretro core (Vulkan)") };
 	case RETRO_NINTENDO:
 		return {
 			MakeCandidate("Gambatte", "gambatte_libretro_android.so", "Game Boy / Game Boy Color"),
@@ -74,6 +85,28 @@ std::vector<RetroHost::CoreCandidate> RetroHost::CoreCandidates(RetroCoreCategor
 	default:
 		return {};
 	}
+}
+
+std::string RetroHost::ResolveCoreForContent(RetroCoreCategory category, const std::string &contentPath) {
+	std::string lower = contentPath;
+	for (char &ch : lower)
+		ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+	const auto lastDot = lower.find_last_of('.');
+	const std::string extension = lastDot == std::string::npos ? std::string() : lower.substr(lastDot);
+	std::string candidate;
+	if (category == RETRO_NINTENDO) {
+		if (extension == ".nds" || extension == ".dsi")
+			candidate = "melonds_libretro_android.so";
+		else if (extension == ".gba")
+			candidate = "mgba_libretro_android.so";
+		else if (extension == ".gb" || extension == ".gbc" || extension == ".sgb")
+			candidate = "gambatte_libretro_android.so";
+	}
+	if (candidate.empty())
+		return {};
+	const std::string nativeDir = Instance().nativeLibDir_;
+	const std::string path = nativeDir.empty() ? candidate : nativeDir + "/" + candidate;
+	return File::Exists(Path(path)) ? path : std::string();
 }
 
 std::string RetroHost::ResolveCorePath(RetroCoreCategory category) const {
@@ -140,8 +173,103 @@ static int16_t InputState(unsigned port, unsigned device, unsigned index, unsign
 	(void)port;
 	(void)device;
 	(void)index;
-	(void)id;
+	if (port == 0 && device == 1 && id < 16)
+		return s_retroJoypadState[id];
 	return 0;
+}
+
+bool RetroHost::ValidatePs2BiosDirectory(const std::string &systemDirectory, std::string *description) {
+	const std::string biosDir = systemDirectory + "/pcsx2/bios";
+	DIR *dir = opendir(biosDir.c_str());
+	if (!dir) {
+		if (description)
+			*description = "PS2 BIOS folder missing: " + biosDir;
+		return false;
+	}
+
+	bool valid = false;
+	std::string validName;
+	std::string validRegion;
+	dirent *entry;
+	while ((entry = readdir(dir)) != nullptr) {
+		const std::string name = entry->d_name;
+		if (name.size() < 5)
+			continue;
+		const std::string lower = [&]() {
+			std::string out = name;
+			for (char &ch : out)
+				ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+			return out;
+		}();
+		if (lower.size() < 4 || lower.substr(lower.size() - 4) != ".bin")
+			continue;
+
+		const std::string path = biosDir + "/" + name;
+		std::FILE *fp = std::fopen(path.c_str(), "rb");
+		if (!fp)
+			continue;
+		std::fseek(fp, 0, SEEK_END);
+		const long fileSize = std::ftell(fp);
+		std::rewind(fp);
+		if (fileSize < 4 * 1024 * 1024 || fileSize > 8 * 1024 * 1024) {
+			std::fclose(fp);
+			continue;
+		}
+
+		bool foundRomVer = false;
+		char romver[15] = {};
+		long romDirOffset = 0;
+		for (long i = 0; i < 512 * 1024; i += 16) {
+			std::fseek(fp, i, SEEK_SET);
+			char entryName[11] = {};
+			std::uint16_t extInfoSize = 0;
+			std::uint32_t romSize = 0;
+			if (std::fread(entryName, 10, 1, fp) != 1)
+				break;
+			entryName[10] = '\0';
+			if (std::fread(&extInfoSize, sizeof(extInfoSize), 1, fp) != 1)
+				break;
+			if (std::fread(&romSize, sizeof(romSize), 1, fp) != 1)
+				break;
+			if (std::strncmp(entryName, "RESET", 5) == 0)
+				break;
+			if (std::strncmp(entryName, "ROMVER", 6) == 0) {
+				std::fseek(fp, romDirOffset, SEEK_SET);
+				if (std::fread(romver, 14, 1, fp) == 1) {
+					romver[14] = '\0';
+					foundRomVer = true;
+				}
+			}
+			romDirOffset += (romSize % 16) == 0 ? romSize : (romSize + 16) & ~15u;
+		}
+		std::fclose(fp);
+
+		if (foundRomVer && romver[4] != '\0') {
+			const char region = romver[4];
+			validRegion = region == 'J' ? "Japan" :
+				region == 'A' ? "USA" :
+				region == 'E' ? "Europe" :
+				region == 'H' ? "Asia" :
+				region == 'C' ? "China" :
+				region == 'T' ? "T10K/Arcade" :
+				region == 'X' ? "Test" : "Region " + std::string(1, region);
+			if (validRegion != "T10K/Arcade") {
+				valid = true;
+				validName = name;
+				break;
+			}
+		}
+	}
+	closedir(dir);
+
+	if (valid) {
+		if (description)
+			*description = validName + " (" + validRegion + ")";
+		return true;
+	}
+	if (description)
+		*description = "No valid PS2 BIOS found in " + biosDir;
+	return false;
 }
 
 static bool Environment(unsigned cmd, void *data) {
@@ -153,14 +281,7 @@ static bool Environment(unsigned cmd, void *data) {
 			*canDupe = true;
 		return true;
 	}
-	case 7: { // RETRO_ENVIRONMENT_SET_PIXEL_FORMAT
-		unsigned *format = static_cast<unsigned *>(data);
-		if (format)
-			s_pixelFormat = static_cast<RetroPixelFormat>(*format);
-		return true;
-	}
-	case 23: // RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY
-	case 6: { // RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY
+	case 9: { // RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY
 		const char **dir = static_cast<const char **>(data);
 		static std::string systemDir;
 		systemDir = GetSysDirectory(DIRECTORY_PSP).ToString() + "/SYSTEM";
@@ -168,11 +289,59 @@ static bool Environment(unsigned cmd, void *data) {
 			*dir = systemDir.c_str();
 		return true;
 	}
+	case 14: { // RETRO_ENVIRONMENT_SET_HW_RENDER
+		s_ps2HwRenderRequested = true;
+		s_ps2VulkanSupported = false;
+		return false;
+	}
+	case 15: { // RETRO_ENVIRONMENT_GET_VARIABLE
+		struct Variable { const char *key; const char *value; };
+		auto *variable = static_cast<Variable *>(data);
+		if (!variable)
+			return false;
+		if (std::strcmp(variable->key, "armsx2_bios") == 0) {
+			variable->value = "auto";
+			return true;
+		}
+		variable->value = "disabled";
+		return true;
+	}
+	case 10: { // RETRO_ENVIRONMENT_SET_PIXEL_FORMAT
+		unsigned *format = static_cast<unsigned *>(data);
+		if (format)
+			s_pixelFormat = static_cast<RetroPixelFormat>(*format);
+		return true;
+	}
+	case 16: // RETRO_ENVIRONMENT_SET_VARIABLES
+		return true;
+	case 31: // RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY
+	case 23: { // RETRO_ENVIRONMENT_GET_CONTENT_DIRECTORY (legacy alias)
+		const char **dir = static_cast<const char **>(data);
+		static std::string systemDir;
+		systemDir = GetSysDirectory(DIRECTORY_PSP).ToString() + "/SYSTEM/save";
+		File::CreateFullPath(Path(systemDir));
+		if (dir)
+			*dir = systemDir.c_str();
+		return true;
+	}
 	case 26: // RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL
+		return true;
+	case 27: // RETRO_ENVIRONMENT_SET_LOG_INTERFACE
 		return true;
 	case 29: // RETRO_ENVIRONMENT_SET_GEOMETRY
 		return true;
-	case 31: // RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME
+	case 32: // RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO
+		return true;
+	case 67: // RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2
+	case 68: // RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2_INTL
+		return true;
+	case 52: { // RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION
+		unsigned *version = static_cast<unsigned *>(data);
+		if (version)
+			*version = 2;
+		return true;
+	}
+	case 18: // RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME
 		return true;
 	default:
 		return false;
@@ -183,6 +352,8 @@ bool RetroHost::LoadCore(RetroCoreCategory category, const std::string &corePath
 	std::lock_guard<std::mutex> lock(mutex_);
 	Shutdown();
 	lastError_.clear();
+	s_ps2HwRenderRequested = false;
+	s_ps2VulkanSupported = false;
 #ifndef __ANDROID__
 	lastError_ = "External libretro cores are supported on Android arm64-v8a";
 	return false;
@@ -268,7 +439,19 @@ bool RetroHost::LoadCore(RetroCoreCategory category, const std::string &corePath
 }
 
 bool RetroHost::LoadContent(const std::string &corePath, const std::string &contentPath) {
-	if (!LoadCore(RETRO_PS2, corePath))
+	return LoadContent(RETRO_PS2, corePath, contentPath);
+}
+
+bool RetroHost::LoadContent(RetroCoreCategory category, const std::string &corePath, const std::string &contentPath) {
+	const std::string systemDir = GetSysDirectory(DIRECTORY_PSP).ToString() + "/SYSTEM";
+	if (category == RETRO_PS2) {
+		std::string biosDescription;
+		if (!ValidatePs2BiosDirectory(systemDir, &biosDescription)) {
+			lastError_ = biosDescription;
+			return false;
+		}
+	}
+	if (!LoadCore(category, corePath))
 		return false;
 	struct RetroGameInfo {
 		const char *path;
@@ -282,12 +465,23 @@ bool RetroHost::LoadContent(const std::string &corePath, const std::string &cont
 		lastError_ = "Libretro core rejected the content";
 		return false;
 	}
+	if (s_ps2HwRenderRequested && !s_ps2VulkanSupported) {
+		lastError_ = "ARMSX2 requires Vulkan >= 1.1, but this frontend cannot create a libretro Vulkan HW-render context yet.";
+		if (retro_unload_game_)
+			retro_unload_game_();
+		return false;
+	}
 	return true;
 }
 
 void RetroHost::RunFrame() {
 	if (loaded_ && retro_run_)
 		retro_run_();
+}
+
+void RetroHost::SetControllerState(unsigned id, int16_t value) {
+	if (id < 16)
+		s_retroJoypadState[id] = value;
 }
 
 void RetroHost::Shutdown() {
